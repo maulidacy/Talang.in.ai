@@ -1,0 +1,17 @@
+# API framework
+fastapi
+
+# Server untuk menjalankan FastAPI di production
+uvicorn[standard]
+
+# Library utama untuk load model dan inference
+tensorflow
+
+# Operasi numerik
+numpy
+
+# Validasi request/response FastAPI
+pydantic
+
+# Support file model .h5 / .keras
+h5py

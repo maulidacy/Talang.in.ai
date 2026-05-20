@@ -1,0 +1,12 @@
+{
+  "max_len": 100,
+  "max_word_len": 15,
+  "word_embed_dim": 128,
+  "char_embed_dim": 32,
+  "char_cnn_dim": 128,
+  "bilstm_units": 256,
+  "dropout": 0.3,
+  "vocab_size": 14669,
+  "char_vocab": 118,
+  "num_tags": 10
+}
