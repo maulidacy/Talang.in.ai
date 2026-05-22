@@ -297,7 +297,7 @@ def train(args):
 def parse_args():
     parser = argparse.ArgumentParser()
 
-    parser.add_argument("--data_path", default="data/training_data.json")
+    parser.add_argument("--data_path", default="data/dataset_fixed.json")
     parser.add_argument("--output_dir", default="outputs")
     parser.add_argument("--model_dir", default="models")
     parser.add_argument("--log_dir", default="logs")

@@ -8,5 +8,5 @@
   "dropout": 0.3,
   "vocab_size": 14669,
   "char_vocab": 118,
-  "num_tags": 10
+  "num_tags": 9
 }
