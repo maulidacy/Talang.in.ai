@@ -7,6 +7,12 @@ import tensorflow as tf
 from src.models.ner_model import BillNERModel
 from src.preprocessing.tokenizer import BillTokenizer
 
+from src.models.layers import (
+    CharCNNEmbedding,
+    WordEmbedding,
+    BiLSTMEncoder,
+    CRFLayer,
+)
 
 class NERPredictor:
     """
@@ -21,12 +27,14 @@ class NERPredictor:
 
     def __init__(
         self,
-        model_weights_path="models/best_ner_model.weights.h5",
+        model_path="models/best_ner_model.weights.h5",
+        format_type="weights",
         vocab_dir="outputs/vocabs",
         config_path="outputs/training_config.json",
     ):
         # Path hasil training
-        self.model_weights_path = model_weights_path
+        self.model_path = model_path
+        self.format_type = format_type.lower()
         self.vocab_dir = vocab_dir
         self.config_path = config_path
 
@@ -48,11 +56,28 @@ class NERPredictor:
             for tag, index in self.tag2idx.items()
         }
 
-        # Build ulang arsitektur model
-        self.model = self._build_model()
-
-        # Load bobot model hasil training
-        self.model.load_weights(model_weights_path)
+        if self.format_type == "weights":
+            print(f"Loading model via manual architecture construction + weights: {model_path}")
+            self.model = self._build_model_from_weights(model_path)
+            
+        elif self.format_type == "keras":
+            print(f"Loading model via full native compiled .keras bundle: {model_path}")
+            custom_objects = {
+                "BillNERModel": BillNERModel,
+                "WordEmbedding": WordEmbedding,
+                "CharCNNEmbedding": CharCNNEmbedding,
+                "BiLSTMEncoder": BiLSTMEncoder,
+                "CRFLayer": CRFLayer,
+            }
+            tf.keras.utils.get_custom_objects().update(custom_objects)
+            self.model = tf.keras.models.load_model(
+                model_path, 
+                custom_objects=custom_objects, 
+                compile=False, 
+                safe_mode=False
+            )
+        else:
+            raise ValueError("format_type harus berupa salah satu dari: 'weights' atau 'keras'")
 
     def _load_json(self, path):
         """
@@ -61,7 +86,7 @@ class NERPredictor:
         with open(path, "r", encoding="utf-8") as file:
             return json.load(file)
 
-    def _build_model(self):
+    def _build_model_from_weights(self, weights_path):
         """
         Membuat ulang arsitektur model dengan ukuran yang sama seperti saat training.
         Model harus dibuild dulu sebelum load_weights.
@@ -89,7 +114,7 @@ class NERPredictor:
 
         # Panggil model sekali agar semua layer terbentuk
         model(dummy_inputs, training=False)
-
+        model.load_weights(weights_path)
         return model
 
     def _vectorize_text(self, text):
@@ -212,20 +237,19 @@ class NERPredictor:
         """
         Fungsi utama untuk prediksi entity dari raw text.
         """
-
         # Ubah text menjadi input numerik
         model_inputs, token_spans = self._vectorize_text(text)
 
-        # Decode tag dari model CRF
+        # Baik format 'weights' maupun '.keras', langsung jalankan decode viterbi dari objek model Keras
         pred_ids = self.model.decode(model_inputs).numpy()[0]
 
-        # Ubah tag id menjadi nama tag BIO
+        # Ubah tag id menjadi nama tag BIO string
         tags = [
             self.idx2tag.get(int(tag_id), "[UNK]")
             for tag_id in pred_ids[:len(token_spans)]
         ]
 
-        # Ubah BIO tag menjadi entity
+        # Ubah BIO tag menjadi entity terstruktur
         entities = self._bio_to_entities(text, token_spans, tags)
 
         return {

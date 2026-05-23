@@ -4,6 +4,7 @@
 # 2. fallback/rule-based entity
 # 3. post-processing transaksi
 
+import re
 from src.inference.predict import NERPredictor
 from .entity_parser import parse_entities_to_transaction
 from .rule_based_ner import predict_entities_rule_based
@@ -28,42 +29,33 @@ def get_predictor():
 
 def merge_missing_group_members(text, entities, group_members):
     """
-    Menambahkan PERSON dari group_members jika namanya ada di text,
-    tetapi tidak berhasil ditangkap oleh model NER.
-
-    Contoh:
-    Model menangkap Ayu dan Nina, tapi melewatkan Raka.
-    Kalau Raka ada di group_members dan muncul di text, maka Raka ditambahkan.
+    Menangkap SEMUA kemunculan nama anggota grup di dalam teks,
+    termasuk jika nama tersebut muncul beberapa kali di baris berbeda.
     """
     if not group_members:
         return entities
-
-    existing_persons = {
-        entity["text"].lower()
-        for entity in entities
-        if entity.get("label") == "PERSON"
-    }
 
     lower_text = text.lower()
     merged_entities = list(entities)
 
     for member in group_members:
         member_lower = member.lower()
+        
+        # Gunakan regex finditer untuk mencari semua indeks kemunculan nama
+        for match in re.finditer(rf'\b{re.escape(member_lower)}\b', lower_text):
+            start = match.start()
+            end = match.end()
 
-        # Jika nama member sudah ada di hasil model, tidak perlu ditambah lagi
-        if member_lower in existing_persons:
-            continue
-
-        # Cari posisi nama member di text
-        start = lower_text.find(member_lower)
-
-        if start != -1:
-            merged_entities.append({
-                "text": text[start:start + len(member)],
-                "label": "PERSON",
-                "start": start,
-                "end": start + len(member),
-            })
+            # Pastikan posisi ini belum dicover oleh entitas yang sudah ada
+            is_covered = any(e.get("start", 0) <= start < e.get("end", 0) for e in merged_entities)
+            
+            if not is_covered:
+                merged_entities.append({
+                    "text": text[start:end],
+                    "label": "PERSON",
+                    "start": start,
+                    "end": end,
+                })
 
     return sorted(merged_entities, key=lambda item: item.get("start", 0))
 
@@ -105,7 +97,7 @@ def analyze_smart_input(text, entities=None, group_members=None):
     )
 
     # Ubah entity menjadi format transaksi Talang.in
-    result = parse_entities_to_transaction(text, entities)
+    result = parse_entities_to_transaction(text, entities, group_members=group_members)
 
     # Cocokkan format nama peserta dengan nama asli dari group_members
     if group_members:

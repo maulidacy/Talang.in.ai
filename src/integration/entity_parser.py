@@ -1,10 +1,10 @@
+import re
 from .price_normalizer import normalize_price
 
 
 def get_entities_by_label(entities, label):
     """
     Mengambil entity berdasarkan label tertentu.
-    Contoh label: PERSON, ITEM, PRICE, MULTIPLIER.
     """
     return [
         entity
@@ -18,97 +18,53 @@ def unique_values(values):
     Menghapus data duplikat tetapi tetap menjaga urutan kemunculan.
     """
     result = []
-
     for value in values:
         if value and value not in result:
             result.append(value)
-
     return result
 
 
 def classify_category(title):
     """
     Klasifikasi kategori sederhana berdasarkan keyword item.
-    Untuk tahap awal cukup rule-based agar stabil.
     """
-
     text = title.lower()
-
     food_keywords = [
         "kopi", "ayam", "nasi", "mie", "pizza", "burger", "roti",
         "susu", "teh", "matcha", "coklat", "kue", "cake", "biscoff",
         "spaghetti", "cireng", "kambing", "ikan", "soto", "bakso",
-        "es", "jus", "steak", "rice", "latte", "boba", "goreng",
+        "es", "jus", "steak", "rice", "latte", "boba", "goreng", "kola", "sushi", "sate", "martabak"
     ]
-
     transport_keywords = ["gojek", "grab", "taxi", "bensin", "parkir"]
     utility_keywords = ["listrik", "air", "wifi", "internet", "pulsa"]
 
     if any(keyword in text for keyword in food_keywords):
         return "Makanan"
-
     if any(keyword in text for keyword in transport_keywords):
         return "Transportasi"
-
     if any(keyword in text for keyword in utility_keywords):
         return "Utilitas"
-
     return "Lainnya"
 
 
 def split_amount_exact(amount, members):
     """
-    Membagi nominal agar totalnya tetap pas.
-
-    Contoh:
-    110000 dibagi 3:
-    - 36667
-    - 36667
-    - 36666
-
-    Total tetap 110000, tidak lebih 1 rupiah.
+    Membagi nominal agar totalnya tetap pas tanpa selisih rupiah.
     """
-
     if not members:
         return []
 
     base_amount = amount // len(members)
     remainder = amount % len(members)
-
     result = []
 
     for index, name in enumerate(members):
         member_amount = base_amount + (1 if index < remainder else 0)
-
         result.append({
             "name": name,
             "amount": member_amount,
         })
-
     return result
-
-
-def pair_items_with_prices(items, prices):
-    """
-    Memasangkan ITEM dengan PRICE berdasarkan urutan kemunculan.
-    Contoh:
-    ITEM pizza -> PRICE 90k
-    ITEM es teh -> PRICE 20k
-    """
-
-    paired_items = []
-
-    for index, item in enumerate(items):
-        price_entity = prices[index] if index < len(prices) else None
-        amount = normalize_price(price_entity["text"]) if price_entity else 0
-
-        paired_items.append({
-            "name": item["text"],
-            "amount": amount,
-            "members": [],
-        })
-
-    return paired_items
 
 
 def calculate_equal_split(amount, participants):
@@ -120,134 +76,183 @@ def calculate_equal_split(amount, participants):
 
 def calculate_itemized_split(items, participants):
     """
-    Menghitung pembagian berdasarkan item.
-    Untuk tahap awal, semua item dibagi ke semua participants.
-    Nanti bisa dikembangkan agar setiap item punya member berbeda.
+    Menghitung pembagian akumulatif berdasarkan item-item yang dikonsumsi.
     """
-
     if not participants:
         return []
 
     balances = {name: 0 for name in participants}
 
     for item in items:
-        # Jika item belum punya members, default-nya dibagi ke semua participants
         item_members = item.get("members") or participants
-
-        if not item_members:
-            continue
-
         split_result = split_amount_exact(item["amount"], item_members)
 
         for split in split_result:
             name = split["name"]
-
             if name not in balances:
                 balances[name] = 0
-
             balances[name] += split["amount"]
 
-        # Simpan members item agar response frontend lengkap
-        item["members"] = item_members
-
     return [
-        {
-            "name": name,
-            "amount": amount,
-        }
+        {"name": name, "amount": amount}
         for name, amount in balances.items()
     ]
 
 
-def parse_entities_to_transaction(text, entities):
+def parse_entities_to_transaction(text, entities, group_members=None):
     """
-    Mengubah hasil entity NER menjadi struktur transaksi Talang.in.
-
-    Input:
-    - text: raw text dari user
-    - entities: hasil model NER
-
-    Output:
-    - title
-    - amount
-    - paidBy
-    - category
-    - splitMethod
-    - participants
-    - items
+    Mengubah hasil entity NER menjadi struktur transaksi terfragmentasi lengkap.
     """
-
-    # Urutkan entity berdasarkan posisi di kalimat
-    sorted_entities = sorted(
-        entities,
-        key=lambda entity: entity.get("start", 0)
-    )
+    group_members = group_members or []
+    sorted_entities = sorted(entities, key=lambda e: e.get("start", 0))
 
     person_entities = get_entities_by_label(sorted_entities, "PERSON")
     item_entities = get_entities_by_label(sorted_entities, "ITEM")
     price_entities = get_entities_by_label(sorted_entities, "PRICE")
+    multiplier_entities = get_entities_by_label(sorted_entities, "MULTIPLIER")
 
-    # Ambil nama, item, dan harga
-    persons = unique_values([entity["text"] for entity in person_entities])
-    items_text = unique_values([entity["text"] for entity in item_entities])
-    prices = [normalize_price(entity["text"]) for entity in price_entities]
+    all_global_persons = unique_values([e["text"] for e in person_entities])
+    global_paid_by = all_global_persons[0] if all_global_persons else "Unknown"
 
-    # Untuk tahap awal, PERSON pertama dianggap sebagai pembayar
-    paid_by = persons[0] if persons else ""
+    valid_items = []
+    global_modifiers = {"tax": 0, "discount": 0}
+    assigned_price_starts = set()
 
-    # Semua PERSON dianggap sebagai peserta split
-    participants = persons if persons else []
+    if item_entities:
+        for i, current_item in enumerate(item_entities):
+            item_start = current_item["start"]
+            item_end_boundary = item_entities[i + 1]["start"] if i + 1 < len(item_entities) else len(text)
+            item_segment_text = text[item_start:item_end_boundary]
 
-    # Judul transaksi diambil dari semua ITEM yang terbaca
-    title = ", ".join(items_text) if items_text else "Transaksi AI"
+            # Prefiks & Perluasan Nama Item
+            left_context = text[max(0, item_start - 15):item_start]
+            match_prefix = re.search(r'\b(nasi|mie|es|jus|roti|matcha|koka|pizza)\b\s*$', left_context, re.IGNORECASE)
+            
+            if match_prefix:
+                extended_name = f"{match_prefix.group(1)} {current_item['text']}"
+                actual_segment_start = text.find(match_prefix.group(1), max(0, item_start - 15))
+            else:
+                extended_name = current_item["text"]
+                actual_segment_start = item_start
 
-    # Kategori ditentukan dari title
-    category = classify_category(title)
+            # Kuantitas / Multiplier Nama Item
+            local_multipliers = [
+                m for m in multiplier_entities
+                if max(0, actual_segment_start - 12) <= m["start"] <= item_end_boundary
+            ]
+            
+            quantity = 1
+            if local_multipliers:
+                m_ent = local_multipliers[0]
+                digits = re.findall(r'\d+', m_ent["text"])
+                if digits:
+                    quantity = int(digits[0])
+                if m_ent["start"] < item_start and m_ent["text"] not in extended_name:
+                    extended_name = f"{m_ent['text']} {extended_name}"
 
-    # Jika ada keyword total, ambil harga terbesar sebagai total
-    has_total_keyword = any(
-        keyword in text.lower()
-        for keyword in ["total", "grand total", "amount", "nominal"]
-    )
+            segment_text_full = text[actual_segment_start:item_end_boundary]
 
-    if not prices:
-        amount = 0
-    elif has_total_keyword:
-        amount = max(prices)
-    elif len(prices) > 1 and len(item_entities) > 1:
-        amount = sum(prices)
-    else:
-        amount = prices[0]
+            # Deteksi Pembayar Spesifik per Item Segment (Multi-Payer)
+            item_paid_by = global_paid_by
+            lookback_context = text[max(0, actual_segment_start - 35):current_item["end"]]
+            for p in all_global_persons:
+                if re.search(rf'\b{re.escape(p)}\b\s*(?:bayar|beli|talangin)', lookback_context, re.IGNORECASE):
+                    item_paid_by = p
 
-    # Pasangkan item dan harga
-    parsed_items = pair_items_with_prices(item_entities, price_entities)
+            # Asosiasi Harga Unit vs Harga Total
+            local_prices = [
+                p for p in price_entities 
+                if actual_segment_start <= p["start"] <= item_end_boundary
+            ]
+            
+            item_amount = 0
+            if local_prices:
+                price_ent = local_prices[0]
+                assigned_price_starts.add(price_ent["start"])
+                base_price = normalize_price(price_ent["text"])
+                
+                is_unit_price = "@" in text[max(actual_segment_start, price_ent["start"] - 4):price_ent["start"]]
+                item_amount = base_price * quantity if is_unit_price else base_price
 
-    # Ambil item yang punya amount valid
-    valid_items = [
-        item
-        for item in parsed_items
-        if item["amount"] > 0
-    ]
+            # Filter Pengecualian Anggota
+            exclude_match = re.search(r'\b(kecuali|tanpa)\b', segment_text_full, re.IGNORECASE)
+            local_persons = [
+                p for p in person_entities 
+                if actual_segment_start <= p["start"] <= item_end_boundary
+            ]
+            has_assignment_keyword = bool(re.search(r'\b(untuk|buat|bagi|ke)\b', segment_text_full, re.IGNORECASE))
 
-    # Jika ada lebih dari 1 item valid, pakai itemized
-    if len(valid_items) > 1:
-        split_method = "itemized"
+            # FIX BUG B: Gunakan pool data group asli dari database jika keyword pencabutan aktif
+            if exclude_match:
+                exclude_idx = actual_segment_start + exclude_match.start()
+                excluded_names = {p["text"].lower() for p in local_persons if p["start"] > exclude_idx}
+                
+                baseline_pool = group_members if group_members else all_global_persons
+                item_members = [m for m in baseline_pool if m.lower() not in excluded_names]
+                if not item_members:
+                    item_members = [item_paid_by]
+            elif has_assignment_keyword and local_persons:
+                item_members = unique_values([p["text"] for p in local_persons])
+                if len(item_members) > 1 and item_paid_by in item_members:
+                    payer_pos = text.find(item_paid_by, actual_segment_start)
+                    if payer_pos < text.find(current_item["text"], actual_segment_start) and not re.search(rf'\b{item_paid_by}\b', item_segment_text, re.IGNORECASE):
+                        item_members = [m for m in item_members if m != item_paid_by]
+            else:
+                item_members = all_global_persons if all_global_persons else [item_paid_by]
 
-        for item in valid_items:
-            item["members"] = participants
+            if item_amount > 0:
+                valid_items.append({
+                    "name": extended_name,
+                    "amount": item_amount,
+                    "members": item_members,
+                    "paidBy": item_paid_by
+                })
 
-        participant_amounts = calculate_itemized_split(valid_items, participants)
+    # Menggunakan lookup window terarah lambat untuk mencegah polusi teks sekunder
+    for p_ent in price_entities:
+        if p_ent["start"] not in assigned_price_starts:
+            p_idx = p_ent["start"]
+            surrounding_text = text[max(0, p_idx - 12):min(len(text), p_idx + 6)].lower()
+            modifier_val = normalize_price(p_ent["text"])
+            
+            if any(k in surrounding_text for k in ["diskon", "promo", "potongan", "discount"]):
+                global_modifiers["discount"] += modifier_val
+            elif any(k in surrounding_text for k in ["tax", "pajak", "service", "charge"]):
+                global_modifiers["tax"] += modifier_val
 
-    # Jika hanya satu item atau tidak ada item, pakai equal split
+    # Distribusi Proporsional Pajak / Diskon ke Setiap Item
+    if valid_items:
+        split_method = "itemized" if len(valid_items) > 1 else "equal"
+        base_total_amount = sum(i["amount"] for i in valid_items)
+        net_modifier = global_modifiers["tax"] - global_modifiers["discount"]
+        global_amount = max(0, base_total_amount + net_modifier)
+
+        if base_total_amount > 0 and net_modifier != 0:
+            allocated_modifier_total = 0
+            for idx, item in enumerate(valid_items):
+                if idx == len(valid_items) - 1:
+                    item["amount"] += (net_modifier - allocated_modifier_total)
+                else:
+                    proportion = item["amount"] / base_total_amount
+                    allocated = int(net_modifier * proportion)
+                    item["amount"] += allocated
+                    allocated_modifier_total += allocated
+
+        title = ", ".join(unique_values([i["name"] for i in valid_items]))
+        participant_amounts = calculate_itemized_split(valid_items, all_global_persons)
     else:
         split_method = "equal"
-        valid_items = []
-        participant_amounts = calculate_equal_split(amount, participants)
+        title = "Transaksi AI"
+        prices = [normalize_price(e["text"]) for e in price_entities]
+        global_amount = sum(prices) if prices else 0
+        participant_amounts = calculate_equal_split(global_amount, all_global_persons)
+
+    category = classify_category(title)
 
     return {
         "title": title,
-        "amount": amount,
-        "paidBy": paid_by,
+        "amount": global_amount,
+        "paidBy": global_paid_by,
         "category": category,
         "splitMethod": split_method,
         "participants": participant_amounts,
